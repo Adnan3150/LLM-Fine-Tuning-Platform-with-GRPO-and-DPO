@@ -1,0 +1,189 @@
+------------first web app-------------------
+from flask import Flask, request, render_template_string, redirect, url_for
+import uuid
+from app.state import session_store, prompt_queue, state_lock
+
+def create_app():
+    app = Flask(__name__)
+
+    @app.route("/", methods=["GET", "POST"])
+    def index():
+        if request.method == "POST":
+            prompt = request.form.get("prompt")
+            session_id = str(uuid.uuid4())
+            with state_lock:
+                prompt_queue.append({"session_id": session_id, "prompt": prompt})
+            return redirect(url_for('rate', session_id=session_id))
+            
+        return """
+        <form method='POST'>
+            <textarea name='prompt' rows='5' cols='60'></textarea><br>
+            <input type='submit' value='Submit Prompt'>
+        </form>"""
+
+    @app.route("/rate/<session_id>", methods=["GET", "POST"])
+    def rate(session_id):
+        session = session_store.get(session_id)
+        if not session or not session.get("completions"):  # <- wait until completions are ready
+            return f"""
+            <html><head>
+            <meta http-equiv="refresh" content="2"> <!-- auto-refresh every 2 seconds -->
+            </head><body>
+            <h3>Model is generating completions... Please wait.</h3>
+            </body></html>
+            """
+    
+        if request.method == "POST":
+            for i in range(len(session["completions"])):
+                session["ratings"][i] = float(request.form.get(f"rating_{i}"))
+            session["event"].set()
+            return "<h3>Thank you for your ratings!</h3>"
+    
+        if None in session["ratings"]:
+            html = f"<h2>Prompt:</h2><p>{session['prompt']}</p><form method='POST'>"
+            for i, completion in enumerate(session["completions"]):
+                html += f"""
+                    <h3>Completion {i+1}</h3>
+                    <p>{completion}</p>
+                    <label>Rate (0-1):</label>
+                    <input type='number' name='rating_{i}' min='0' max='1' step='0.05' required><br>
+                """
+            html += "<input type='submit' value='Submit Ratings'></form>"
+            return html
+    
+        return "<p>Already rated. Thanks!</p>"
+
+
+    return app
+----------------------------------------------------------------------------------------------------------------
+-----------------GRPO Trainer-------------------------
+# Wait for human rating
+def wait_for_rating(session_id):
+    session = session_store[session_id]
+    session["event"].wait(timeout=1800)
+    return session["ratings"]
+    
+    
+# Reward function
+def rf(prompts: list, completions: list, **kwargs) -> list:
+    session_id = kwargs.get("session_id")
+    session_store[session_id] = {
+        "prompt": prompts[0],
+        "completions": completions,
+        "ratings": [None] * len(completions),
+        "event": threading.Event()
+    }
+    print(f"[INFO] Awaiting ratings at: /rate/{session_id}")
+    return wait_for_rating(session_id)
+    ______________________________web_app__________________
+import threading
+from flask import Flask, request, render_template_string, redirect, url_for
+import uuid
+from app.state import session_store, prompt_queue, state_lock
+
+def create_app():
+    app = Flask(__name__)
+      
+    @app.route("/", methods=["GET", "POST"])
+    def index():
+        if request.method == "POST":
+            prompt = request.form.get("prompt")
+            session_id = str(uuid.uuid4())
+        
+            with state_lock:
+                prompt_queue.append({"session_id": session_id, "prompt": prompt})
+                # Just store prompt. Let rf() set completions and ratings later
+                session_store[session_id] = {
+                    "prompt": prompt,
+                    "num_of_epochs": 0
+                }
+        
+            return redirect(url_for('rate', session_id=session_id))
+    
+        return """
+        <form method='POST'>
+            <textarea name='prompt' rows='5' cols='60'></textarea><br>
+            <input type='submit' value='Submit Prompt'>
+        </form>"""
+    
+    @app.route("/rate/<session_id>", methods=["GET", "POST"])
+    def rate(session_id):
+        session = session_store.get(session_id)
+        
+        if session is None:
+            return """
+            <html><head>
+            <meta http-equiv="refresh" content="2">
+            </head><body>
+            <h3>Model is generating completions... Please wait.</h3>
+            </body></html>
+            """
+        # Initialize epoch counter per session
+        print("completions",session.get("completions"))
+        print("num_of_epoch",session.get("num_of_epochs"))
+        if session.get("num_of_epochs") == 2:
+            return "<p>Final submission done. Thanks!</p>"
+    
+        if not session.get("completions") and session.get("num_of_epochs") < 2:
+            return """
+            <html><head>
+            <meta http-equiv="refresh" content="2">
+            </head><body>
+            <h3>Model is generating completions... Please wait.</h3>
+            </body></html>
+            """
+    
+        if request.method == "POST":
+            # Collect ratings from the form
+            for i in range(len(session["completions"])):  
+                session["ratings"][i] = float(request.form.get(f"rating_{i}"))
+            session["num_of_epochs"] += 1
+            session["event"].set()  # Signal background thread to proceed
+            return redirect(url_for('rate', session_id=session_id))
+    
+        if session["num_of_epochs"] < 2 and None in session["ratings"]:
+            print("please rate")
+              # Increment epoch counter after collecting ratings
+    
+            html = f"<h2>Prompt:</h2><p>{session['prompt']}</p><form method='POST'>"
+            for i, completion in enumerate(session["completions"]):
+                html += f"""
+                    <h3>Completion {i+1}</h3>
+                    <p>{completion}</p>
+                    <label>Rate (0-1):</label>
+                    <input type='number' name='rating_{i}' min='0' max='1' step='0.05' required><br>
+                """
+            html += "<input type='submit' value='Submit Ratings'></form>"
+            return html
+    
+        return "<p>Already rated. Thanks!</p>"
+            
+    return app
+    ----------------------------for multiusers---------------
+def train_session(session_id, prompt):
+try:
+    local_model = load_model()  # your function to load base model with LoRA, tokenizer
+    local_trainer = GRPOTrainer(
+        model=local_model,
+        processing_class=tokenizer,
+        reward_funcs=[make_reward_func(session_id)],
+        args=training_args,
+        train_dataset=Dataset.from_list([{"prompt": prompt}])
+    )
+    local_trainer.train()
+    local_model.save_pretrained(LORA_PATH)
+except Exception as e:
+    print(f"[ERROR] Training failed for session {session_id}: {e}")
+finally:
+    with state_lock:
+        session_store.pop(session_id, None)
+
+def start_background_training():
+    while True:
+        with state_lock:
+            if prompt_queue:
+                current = prompt_queue.pop(0)
+                session_id = current["session_id"]
+                prompt = current["prompt"]
+                threading.Thread(target=train_session, args=(session_id, prompt), daemon=True).start()
+        time.sleep(1)

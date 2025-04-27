@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>GRPO App</title>
+</head>
+<body>
+    <h1>Welcome to GRPO</h1>
+    <button id="generateBtn">Generate</button>
+    <p id="statusText"></p>
+
+    <script>
+        document.getElementById('generateBtn').onclick = function () {
+            document.getElementById('statusText').innerText = "Generating...";
+
+            fetch('/generate', { method: 'POST' })
+                .then(() => {
+                    // Poll the status endpoint
+                    const interval = setInterval(() => {
+                        fetch('/status')
+                            .then(response => response.json())
+                            .then(data => {
+                                if (data.status === 'done') {
+                                    clearInterval(interval);
+                                    window.location.href = '/rate';
+                                }
+                            });
+                    }, 1000); // check every second
+                });
+        };
+    </script>
+</body>
+</html>
